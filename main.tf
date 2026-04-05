@@ -18,6 +18,7 @@ data "aws_availability_zones" "available_azs" {
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
+  enable_dns_support   = true
 
   tags = {
     Name = "${var.title}-vpc"
@@ -35,7 +36,7 @@ resource "aws_internet_gateway" "main" {
 resource "aws_subnet" "public_subnet_1" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.1.0/24"
-  availability_zone = aws_availability_zones.available_azs.names[0]
+  availability_zone = data.aws_availability_zones.available_azs.names[0]
 
   tags = {
     Name = "${var.title}-public_subnet_1"
@@ -45,7 +46,7 @@ resource "aws_subnet" "public_subnet_1" {
 resource "aws_subnet" "public_subnet_2" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.2.0/24"
-  availability_zone = aws_availability_zones.available_azs.names[1]
+  availability_zone = data.aws_availability_zones.available_azs.names[1]
 
   tags = {
     Name = "${var.title}-public_subnet_2"
@@ -55,7 +56,7 @@ resource "aws_subnet" "public_subnet_2" {
 resource "aws_subnet" "private_subnet_1" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.3.0/24"
-  availability_zone = aws_availability_zones.available_azs.names[0]
+  availability_zone = data.aws_availability_zones.available_azs.names[0]
 
   tags = {
     Name = "${var.title}-private_subnet_1"
@@ -65,14 +66,18 @@ resource "aws_subnet" "private_subnet_1" {
 resource "aws_subnet" "private_subnet_2" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.4.0/24"
-  availability_zone = aws_availability_zones.available_azs.names[2]
+  availability_zone = data.aws_availability_zones.available_azs.names[1]
 
   tags = {
     Name = "${var.title}-private_subnet_2"
   }
 }
 
-resource "aws_eip" "nat_eip" {
+resource "aws_eip" "nat_eips" {
+  for_each = toset([
+    aws_subnet.public_subnet_1.id,
+    aws_subnet.public_subnet_2.id
+  ])
   domain = "vpc"
 
   tags = {
@@ -80,10 +85,14 @@ resource "aws_eip" "nat_eip" {
   }
 }
 
-resource "aws_nat_gateway" "main" {
-  subnet_id         = aws_subnet.public_subnet_1.id
+resource "aws_nat_gateway" "mains" {
+  for_each = toset([
+    aws_subnet.public_subnet_1.id,
+    aws_subnet.public_subnet_2.id
+  ])
+  subnet_id         = each.value
   connectivity_type = "public"
-  allocation_id     = aws_eip.nat_eip.id
+  allocation_id     = aws_eip.nat_eips[each.value].id
 
   tags = {
     Name = "${var.title}-nat"
@@ -94,11 +103,6 @@ resource "aws_nat_gateway" "main" {
 
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "10.0.0.0/16"
-    gateway_id = "local"
-  }
 
   route {
     cidr_block = "0.0.0.0/0"
@@ -123,28 +127,26 @@ resource "aws_route_table_association" "public_rt_associations" {
 
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "10.0.0.0/16"
-    gateway_id = "local"
-  }
+  for_each = aws_nat_gateway.mains
 
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_nat_gateway.main.id
+    gateway_id = each.value.id
   }
 
-  name = "${var.title} private rt"
+  tags = {
+    name = "${var.title} private rt"
+  }
 }
 
 resource "aws_route_table_association" "private_rt_associations" {
-  for_each = toset([
-    aws_subnet.private_subnet_1.id,
-    aws_subnet.private_subnet_2.id
-  ])
+  for_each = {
+    (aws_subnet.private_subnet_1.id) = aws_route_table.private_rt[aws_subnet.public_subnet_1.id].id
+    (aws_subnet.private_subnet_2.id) = aws_route_table.private_rt[aws_subnet.public_subnet_2.id].id
+  }
 
-  subnet_id      = each.value
-  route_table_id = aws_route_table.private_rt.id
+  subnet_id      = each.key
+  route_table_id = each.value
 }
 
 resource "aws_security_group" "web_sg" {
@@ -188,6 +190,7 @@ resource "aws_vpc_security_group_ingress_rule" "web_allow_http" {
   from_port         = 80
   ip_protocol       = "tcp"
   to_port           = 80
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "web_allow_https" {
@@ -195,6 +198,7 @@ resource "aws_vpc_security_group_ingress_rule" "web_allow_https" {
   from_port         = 443
   ip_protocol       = "tcp"
   to_port           = 443
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "web_allow_ssh" {
@@ -210,6 +214,23 @@ resource "aws_vpc_security_group_ingress_rule" "bastion_allow_ssh" {
   from_port         = 22
   ip_protocol       = "tcp"
   to_port           = 22
+  cidr_ipv4         = var.current_ip
+}
+
+resource "aws_vpc_security_group_ingress_rule" "db_allow_ssh" {
+  security_group_id = aws_security_group.db_sg.id
+  referenced_security_group_id = aws_security_group.bastion_sg.id
+  from_port         = 22
+  ip_protocol       = "tcp"
+  to_port           = 22
+}
+
+resource "aws_vpc_security_group_ingress_rule" "db_allow_postgres" {
+  security_group_id = aws_security_group.db_sg.id
+  referenced_security_group_id = aws_security_group.web_sg.id
+  from_port         = 5432
+  ip_protocol       = "tcp"
+  to_port           = 5432
 }
 
 resource "aws_vpc_security_group_ingress_rule" "lb_allow_http" {
@@ -217,6 +238,7 @@ resource "aws_vpc_security_group_ingress_rule" "lb_allow_http" {
   from_port         = 80
   ip_protocol       = "tcp"
   to_port           = 80
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "lb_allow_https" {
@@ -224,6 +246,7 @@ resource "aws_vpc_security_group_ingress_rule" "lb_allow_https" {
   from_port         = 443
   ip_protocol       = "tcp"
   to_port           = 443
+  cidr_ipv4         = "0.0.0.0/0"
 }
 
 data "aws_ami" "main" {
@@ -241,7 +264,7 @@ data "aws_ami" "main" {
 }
 
 resource "aws_key_pair" "deployer_key_pair" {
-  key_name   = "deployer-key"
+  key_name   = var.key_pair_name
   public_key = var.deployer_public_key
 
   tags = {
@@ -251,11 +274,11 @@ resource "aws_key_pair" "deployer_key_pair" {
 
 resource "aws_instance" "bastion" {
   ami                         = data.aws_ami.main.id
-  instance_type               = var.instance_type
+  instance_type               = var.web_instance_type
   subnet_id                   = aws_subnet.public_subnet_1.id
   vpc_security_group_ids      = [aws_security_group.bastion_sg.id]
   associate_public_ip_address = true
-  key_name                    = aws_key_pair.deployer_key_pair
+  key_name                    = aws_key_pair.deployer_key_pair.key_name
 
   tags = {
     Name = "Bastion Host"
@@ -263,8 +286,8 @@ resource "aws_instance" "bastion" {
 }
 
 resource "aws_instance" "web_1" {
-  ami                    = aws_ami.main.id
-  instance_type          = var.instance_type
+  ami                    = data.aws_ami.main.id
+  instance_type          = var.web_instance_type
   subnet_id              = aws_subnet.private_subnet_1.id
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
@@ -276,8 +299,8 @@ resource "aws_instance" "web_1" {
 }
 
 resource "aws_instance" "web_2" {
-  ami                    = aws_ami.main.id
-  instance_type          = var.instance_type
+  ami                    = data.aws_ami.main.id
+  instance_type          = var.web_instance_type
   subnet_id              = aws_subnet.private_subnet_2.id
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
@@ -289,8 +312,9 @@ resource "aws_instance" "web_2" {
 }
 
 resource "aws_instance" "database" {
-  ami                    = aws_ami.main.id
-  instance_type          = var.instance_type
+  ami                    = data.aws_ami.main.id
+  instance_type          = var.db_instance_type
+
   vpc_security_group_ids = [aws_security_group.db_sg.id]
   subnet_id              = aws_subnet.private_subnet_2.id
 

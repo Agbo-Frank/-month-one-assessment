@@ -1,0 +1,15 @@
+# Copy this file to terraform.tfvars and fill in the values before deploying.
+# Do NOT commit terraform.tfvars to version control — it may contain sensitive data.
+
+region           = "us-east-1"
+title            = "techcorp"
+web_instance_type = "t3.micro"
+db_instance_type  = "t3.small"
+key_pair_name    = "deployer-key"
+
+# Your public SSH key (contents of ~/.ssh/id_rsa.pub or similar)
+deployer_public_key = "ssh-rsa AAAA...your-public-key-here"
+
+# Your current public IP in CIDR notation — used to restrict SSH to the bastion
+# Find yours by running: curl ifconfig.me
+current_ip = "YOUR_IP/32"
