@@ -74,28 +74,25 @@ resource "aws_subnet" "private_subnet_2" {
 }
 
 resource "aws_eip" "nat_eips" {
-  for_each = toset([
-    aws_subnet.public_subnet_1.id,
-    aws_subnet.public_subnet_2.id
-  ])
-  domain = "vpc"
+  for_each = toset(["subnet_1", "subnet_2"])
+  domain   = "vpc"
 
   tags = {
-    Name = "${var.title}-nat-eip"
+    Name = "${var.title}-nat-eip-${each.key}"
   }
 }
 
 resource "aws_nat_gateway" "mains" {
-  for_each = toset([
-    aws_subnet.public_subnet_1.id,
-    aws_subnet.public_subnet_2.id
-  ])
+  for_each = {
+    subnet_1 = aws_subnet.public_subnet_1.id
+    subnet_2 = aws_subnet.public_subnet_2.id
+  }
   subnet_id         = each.value
   connectivity_type = "public"
-  allocation_id     = aws_eip.nat_eips[each.value].id
+  allocation_id     = aws_eip.nat_eips[each.key].id
 
   tags = {
-    Name = "${var.title}-nat"
+    Name = "${var.title}-nat-${each.key}"
   }
 
   depends_on = [aws_internet_gateway.main]
@@ -115,10 +112,10 @@ resource "aws_route_table" "public_rt" {
 }
 
 resource "aws_route_table_association" "public_rt_associations" {
-  for_each = toset([
-    aws_subnet.public_subnet_1.id,
-    aws_subnet.public_subnet_2.id
-  ])
+  for_each = {
+    subnet_1 = aws_subnet.public_subnet_1.id
+    subnet_2 = aws_subnet.public_subnet_2.id
+  }
 
   subnet_id      = each.value
   route_table_id = aws_route_table.public_rt.id
@@ -126,36 +123,27 @@ resource "aws_route_table_association" "public_rt_associations" {
 
 
 resource "aws_route_table" "private_rt" {
-  vpc_id = aws_vpc.main.id
-  for_each = aws_nat_gateway.mains
+  for_each = toset(["subnet_1", "subnet_2"])
+  vpc_id   = aws_vpc.main.id
 
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = each.value.id
+    gateway_id = aws_nat_gateway.mains[each.key].id
   }
 
   tags = {
-    name = "${var.title} private rt"
+    name = "${var.title} private rt ${each.key}"
   }
 }
 
 resource "aws_route_table_association" "private_rt_associations" {
   for_each = {
-    (aws_subnet.private_subnet_1.id) = aws_route_table.private_rt[aws_subnet.public_subnet_1.id].id
-    (aws_subnet.private_subnet_2.id) = aws_route_table.private_rt[aws_subnet.public_subnet_2.id].id
+    subnet_1 = aws_subnet.private_subnet_1.id
+    subnet_2 = aws_subnet.private_subnet_2.id
   }
 
-  subnet_id      = each.key
-  route_table_id = each.value
-}
-
-resource "aws_security_group" "web_sg" {
-  name   = "Web security group"
-  vpc_id = aws_vpc.main.id
-
-  tags = {
-    Name = "web-sg"
-  }
+  subnet_id      = each.value
+  route_table_id = aws_route_table.private_rt[each.key].id
 }
 
 resource "aws_security_group" "bastion_sg" {
@@ -164,6 +152,15 @@ resource "aws_security_group" "bastion_sg" {
 
   tags = {
     Name = "bastion-sg"
+  }
+}
+
+resource "aws_security_group" "web_sg" {
+  name   = "Web security group"
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "web-sg"
   }
 }
 
@@ -249,6 +246,30 @@ resource "aws_vpc_security_group_ingress_rule" "lb_allow_https" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
+resource "aws_vpc_security_group_egress_rule" "web_allow_all_outbound" {
+  security_group_id = aws_security_group.web_sg.id
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_vpc_security_group_egress_rule" "bastion_allow_all_outbound" {
+  security_group_id = aws_security_group.bastion_sg.id
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_vpc_security_group_egress_rule" "db_allow_all_outbound" {
+  security_group_id = aws_security_group.db_sg.id
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_vpc_security_group_egress_rule" "lb_allow_all_outbound" {
+  security_group_id = aws_security_group.lb_sg.id
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
 data "aws_ami" "main" {
   owners = ["amazon"]
 
@@ -290,8 +311,11 @@ resource "aws_instance" "web_1" {
   instance_type          = var.web_instance_type
   subnet_id              = aws_subnet.private_subnet_1.id
   vpc_security_group_ids = [aws_security_group.web_sg.id]
+  key_name               = aws_key_pair.deployer_key_pair.key_name
 
   user_data = file("user-data/web_server_setup.sh")
+
+  depends_on = [aws_nat_gateway.mains]
 
   tags = {
     Name = "Web Server 1"
@@ -303,8 +327,11 @@ resource "aws_instance" "web_2" {
   instance_type          = var.web_instance_type
   subnet_id              = aws_subnet.private_subnet_2.id
   vpc_security_group_ids = [aws_security_group.web_sg.id]
+  key_name               = aws_key_pair.deployer_key_pair.key_name
 
   user_data = file("user-data/web_server_setup.sh")
+
+  depends_on = [aws_nat_gateway.mains]
 
   tags = {
     Name = "Web Server 2"
@@ -314,9 +341,9 @@ resource "aws_instance" "web_2" {
 resource "aws_instance" "database" {
   ami                    = data.aws_ami.main.id
   instance_type          = var.db_instance_type
-
   vpc_security_group_ids = [aws_security_group.db_sg.id]
   subnet_id              = aws_subnet.private_subnet_2.id
+  key_name               = aws_key_pair.deployer_key_pair.key_name
 
   user_data = file("user-data/db_server_setup.sh")
 
@@ -332,7 +359,7 @@ resource "aws_lb" "main" {
   security_groups    = [aws_security_group.lb_sg.id]
   subnets            = [aws_subnet.public_subnet_1.id, aws_subnet.public_subnet_2.id]
 
-  enable_deletion_protection = true
+  enable_deletion_protection = false
 
   tags = {
     Environment = "production"
@@ -346,7 +373,7 @@ resource "aws_lb_target_group" "main" {
   vpc_id   = aws_vpc.main.id
 
   health_check {
-    path                = "/" # or your specific health endpoint
+    path                = "/"
     interval            = 30
     timeout             = 5
     healthy_threshold   = 3

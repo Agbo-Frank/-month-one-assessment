@@ -1,4 +1,4 @@
-# TechCorp AWS Infrastructure
+# AWS Infrastructure
 
 Terraform configuration that provisions a high-availability web application infrastructure on AWS, including a VPC, public/private subnets, NAT gateways, a bastion host, web servers, a database server, and an application load balancer.
 

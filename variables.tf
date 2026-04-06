@@ -31,6 +31,7 @@ variable "key_pair_name" {
 variable "deployer_public_key" {
   description = "The public SSH key used to create the EC2 key pair for instance access"
   type        = string
+  sensitive   = true
 }
 
 variable "current_ip" {
